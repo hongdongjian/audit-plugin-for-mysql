@@ -18,3 +18,7 @@
 SET(SOURCES server_audit.cc file_logger.cc)
 
 MYSQL_ADD_PLUGIN(server_audit ${SOURCES} MODULE_ONLY MODULE_OUTPUT_NAME "server_audit")
+
+ADD_COMPILE_FLAGS(
+    server_audit.cc
+    COMPILE_FLAGS -Wno-error=stringop-truncation)

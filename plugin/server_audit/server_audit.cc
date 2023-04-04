@@ -101,6 +101,8 @@ static void closelog() {}
 #include <mysql/plugin_audit.h>
 #include <string.h>
 #include "../../mysys/mysys_priv.h"
+#include <mysql/components/services/mysql_thd_attributes.h>
+#include <mysql/components/services/mysql_string.h>
 #ifndef RTLD_DEFAULT
 #define RTLD_DEFAULT NULL
 #endif
@@ -150,6 +152,28 @@ static char const *default_home= ".";
 #define flogger_mutex_destroy(A) pthread_mutex_destroy(mysql_mutex_real_mutex(A))
 #define flogger_mutex_lock(A) pthread_mutex_lock(mysql_mutex_real_mutex(A))
 #define flogger_mutex_unlock(A) pthread_mutex_unlock(mysql_mutex_real_mutex(A))
+
+static SERVICE_TYPE(registry) *reg_srv = nullptr;
+SERVICE_TYPE(mysql_thd_attributes) *mysql_thd_attributes = nullptr;
+template <class T>
+T *acquire_service(const char *service_name) {
+  my_h_service my_service;
+  if (!reg_srv) return nullptr;
+  if (!reg_srv->acquire(service_name, &my_service))
+    return reinterpret_cast<T *>(my_service);
+  return nullptr;
+}
+template <class T, class TNoConst>
+void release_service(T *service) {
+  reg_srv->release(
+      reinterpret_cast<my_h_service>(const_cast<TNoConst *>(service)));
+}
+#define ACQUIRE_SERVICE(name)                        \
+  name = acquire_service<SERVICE_TYPE(name)>(#name); \
+  if (name == nullptr) return 1;
+#define RELEASE_SERVICE(service)                                          \
+  release_service<SERVICE_TYPE(service), SERVICE_TYPE_NO_CONST(service)>( \
+      service);
 
 #ifndef DBUG_OFF
 #define PLUGIN_DEBUG_VERSION "-debug"
@@ -1081,7 +1105,7 @@ static char escaped_char(char c)
 }
 
 
-static void setup_connection_initdb(struct connection_info *cn,
+static void setup_connection_initdb(MYSQL_THD thd, struct connection_info *cn,
     const struct mysql_event_general *event)
 {
   size_t user_len;
@@ -1091,8 +1115,14 @@ static void setup_connection_initdb(struct connection_info *cn,
   cn->query_id= 0;
   cn->query_length= 0;
   cn->log_always= 0;
-  get_str_n(cn->db, &cn->db_length, sizeof(cn->db),
-            event->general_query.str, event->general_query.length);
+  String *db;
+  if (!mysql_thd_attributes->get(thd, "db", reinterpret_cast<void *>(&db))) {
+      get_str_n(cn->db, &cn->db_length, sizeof(cn->db), db->ptr(), db->length());
+      db->~String();
+  } else {
+      get_str_n(cn->db, &cn->db_length, sizeof(cn->db),
+                event->general_query.str, event->general_query.length);
+  }
 
   if (get_user_host(event->general_user.str, event->general_user.length,
                     uh_buffer, sizeof(uh_buffer),
@@ -1257,7 +1287,7 @@ static int log_proxy(const struct connection_info *cn,
                     cn->ip, cn->ip_length,
                     event->connection_id, 0, "PROXY_CONNECT");
   csize+= snprintf(message+csize, sizeof(message) - 1 - csize,
-    ",%.*s,`%.*s`@`%.*s`,%d,%s", cn->db_length, cn->db,
+    ",%.*s,`%.*s`@`%.*s`,%d,%s,0,0,0", cn->db_length, cn->db,
                      cn->proxy_length, cn->proxy,
                      cn->proxy_host_length, cn->proxy_host,
                      event->status, connection_type_map[event->connection_type]);
@@ -1282,7 +1312,7 @@ static int log_connection(const struct connection_info *cn,
                     cn->ip, cn->ip_length,
                     event->connection_id, 0, type);
   csize+= snprintf(message+csize, sizeof(message) - 1 - csize,
-    ",%.*s,,%d,%s", cn->db_length, cn->db, event->status, connection_type_map[event->connection_type]);
+    ",%.*s,,%d,%s,0,0,0", cn->db_length, cn->db, event->status, connection_type_map[event->connection_type]);
   message[csize]= '\n';
   return write_log(message, csize + 1, 1);
 }
@@ -1303,7 +1333,7 @@ static int log_connection_event(const struct mysql_event_connection *event,
                     event->ip.str, event->ip.length,
                     event->connection_id, 0, type);
   csize+= snprintf(message+csize, sizeof(message) - 1 - csize,
-    ",%.*s,,%d,%s", static_cast<int>(event->database.length), event->database.str, event->status, connection_type_map[event->connection_type]);
+    ",%.*s,,%d,%s,0,0,0", static_cast<int>(event->database.length), event->database.str, event->status, connection_type_map[event->connection_type]);
   message[csize]= '\n';
   return write_log(message, csize + 1, 1);
 }
@@ -1561,7 +1591,8 @@ not_in_list:
 static int log_statement_ex(const struct connection_info *cn,
                             time_t ev_time, unsigned long thd_id,
                             const char *query, unsigned int query_len,
-                            int error_code, const char *type, int take_lock)
+                            int error_code, const char *type, int take_lock,
+                            ulonglong examined_row_count, ulonglong affected_row_count, ulonglong return_row_count)
 {
   size_t csize;
   char message_loc[1024];
@@ -1708,7 +1739,7 @@ do_log_query:
       break;
   }
   csize+= snprintf(message+csize, message_size - 1 - csize,
-                      "\',%d,,", error_code);
+                      "\',%d,,,%lld,%lld,%lld", error_code, examined_row_count, affected_row_count, return_row_count);
   message[csize]= '\n';
   result= write_log(message, csize + 1, take_lock);
   if (message == big_buffer)
@@ -1718,13 +1749,31 @@ do_log_query:
 }
 
 
-static int log_statement(const struct connection_info *cn,
+static int log_statement(MYSQL_THD thd, const struct connection_info *cn,
                          const struct mysql_event_general *event,
                          const char *type)
 {
+  ulonglong examined_row_count, affected_row_count, sent_row_count;
+  longlong row_count_func;
+  if (mysql_thd_attributes->get(thd, "examined_row_count", reinterpret_cast<void *>(&examined_row_count))) {
+      examined_row_count = 0;
+  }
+  if (mysql_thd_attributes->get(thd, "row_count_func", reinterpret_cast<void *>(&row_count_func))) {
+      row_count_func = 0;
+  }
+  if (mysql_thd_attributes->get(thd, "sent_row_count", reinterpret_cast<void *>(&sent_row_count))) {
+      sent_row_count = 0;
+  }
+  if (row_count_func < 0) {
+    affected_row_count = 0;
+  } else {
+    affected_row_count = row_count_func;
+  }
+
   return log_statement_ex(cn, event->general_time, event->general_thread_id,
                           event->general_query.str, event->general_query.length,
-                          event->general_error_code, type, 1);
+                          event->general_error_code, type, 1, examined_row_count,
+                          affected_row_count, sent_row_count);
 }
 
 
@@ -1767,7 +1816,7 @@ static struct connection_info ci_disconnect_buffer;
 #define AA_CHANGE_USER 2
 
 
-static void update_connection_info(struct connection_info *cn,
+static void update_connection_info(MYSQL_THD thd, struct connection_info *cn,
     mysql_event_class_t event_class, const void *ev, int *after_action)
 {
   *after_action= 0;
@@ -1787,8 +1836,14 @@ static void update_connection_info(struct connection_info *cn,
           if (init_db_command)
           {
             /* Change DB */
-            get_str_n(cn->db, &cn->db_length, sizeof(cn->db),
-                event->general_query.str, event->general_query.length);
+            String *db;
+            if (!mysql_thd_attributes->get(thd, "db", reinterpret_cast<void *>(&db))) {
+              get_str_n(cn->db, &cn->db_length, sizeof(cn->db), db->ptr(), db->length());
+              db->~String();
+            } else {
+                get_str_n(cn->db, &cn->db_length, sizeof(cn->db),
+                          event->general_query.str, event->general_query.length);
+            } 
           }
           cn->query_id = query_counter++;
           cn->query= event->general_query.str;
@@ -1797,7 +1852,7 @@ static void update_connection_info(struct connection_info *cn,
           update_general_user(cn, event);
         }
         else if (init_db_command)
-          setup_connection_initdb(cn, event);
+          setup_connection_initdb(thd, cn, event);
         else if (event_query_command(event))
           setup_connection_query(cn, event);
         else
@@ -1882,7 +1937,7 @@ int auditing(MYSQL_THD thd, mysql_event_class_t event_class, const void *ev)
 
   cn= get_loc_info(thd);
 
-  update_connection_info(cn, event_class, ev, &after_action);
+  update_connection_info(thd, cn, event_class, ev, &after_action);
 
   if (!logging)
   {
@@ -1902,7 +1957,7 @@ int auditing(MYSQL_THD thd, mysql_event_class_t event_class, const void *ev)
     if (event->event_subclass == MYSQL_AUDIT_GENERAL_STATUS &&
         event_query_command(event))
     {
-      log_statement(cn, event, "QUERY");
+      log_statement(thd, cn, event, "QUERY");
       cn->query_length= 0;
       cn->log_always= 0;
     }
@@ -2137,6 +2192,9 @@ static int server_audit_init(void *p __attribute__((unused)))
   ci_disconnect_buffer.query= empty_str;
   ci_disconnect_buffer.query_length= 0;
 
+  reg_srv = mysql_plugin_registry_acquire();
+  ACQUIRE_SERVICE(mysql_thd_attributes);
+
   if (logging)
     start_logging();
 
@@ -2163,6 +2221,8 @@ static int server_audit_deinit(void *p __attribute__((unused)))
   mysql_prlock_destroy(&lock_operations);
   flogger_mutex_destroy(&lock_atomic);
   flogger_mutex_destroy(&lock_bigbuffer);
+
+  RELEASE_SERVICE(mysql_thd_attributes);
 
   error_header();
   fprintf(stderr, "STOPPED\n");
@@ -2226,7 +2286,7 @@ static void log_current_query(MYSQL_THD thd)
   {
     cn->log_always= 1;
     log_statement_ex(cn, cn->query_time, thd_get_thread_id(thd),
-		     cn->query, cn->query_length, 0, "QUERY", 0);
+		     cn->query, cn->query_length, 0, "QUERY", 0, 0, 0, 0);
     cn->log_always= 0;
   }
 }

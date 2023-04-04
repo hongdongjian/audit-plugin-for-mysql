@@ -1257,7 +1257,7 @@ static int log_proxy(const struct connection_info *cn,
                     cn->ip, cn->ip_length,
                     event->connection_id, 0, "PROXY_CONNECT");
   csize+= snprintf(message+csize, sizeof(message) - 1 - csize,
-    ",%.*s,`%.*s`@`%.*s`,%d,%s", cn->db_length, cn->db,
+    ",%.*s,`%.*s`@`%.*s`,%d,%s,0,0,0", cn->db_length, cn->db,
                      cn->proxy_length, cn->proxy,
                      cn->proxy_host_length, cn->proxy_host,
                      event->status, connection_type_map[event->connection_type]);
@@ -1282,7 +1282,7 @@ static int log_connection(const struct connection_info *cn,
                     cn->ip, cn->ip_length,
                     event->connection_id, 0, type);
   csize+= snprintf(message+csize, sizeof(message) - 1 - csize,
-    ",%.*s,,%d,%s", cn->db_length, cn->db, event->status, connection_type_map[event->connection_type]);
+    ",%.*s,,%d,%s,0,0,0", cn->db_length, cn->db, event->status, connection_type_map[event->connection_type]);
   message[csize]= '\n';
   return write_log(message, csize + 1, 1);
 }
@@ -1303,7 +1303,7 @@ static int log_connection_event(const struct mysql_event_connection *event,
                     event->ip.str, event->ip.length,
                     event->connection_id, 0, type);
   csize+= snprintf(message+csize, sizeof(message) - 1 - csize,
-    ",%.*s,,%d,%s", static_cast<int>(event->database.length), event->database.str, event->status, connection_type_map[event->connection_type]);
+    ",%.*s,,%d,%s,0,0,0", static_cast<int>(event->database.length), event->database.str, event->status, connection_type_map[event->connection_type]);
   message[csize]= '\n';
   return write_log(message, csize + 1, 1);
 }
@@ -1561,7 +1561,10 @@ not_in_list:
 static int log_statement_ex(const struct connection_info *cn,
                             time_t ev_time, unsigned long thd_id,
                             const char *query, unsigned int query_len,
-                            int error_code, const char *type, int take_lock)
+                            int error_code, const char *type, int take_lock,
+                            unsigned long long general_examined_row_count,
+                            unsigned long long general_affected_row_count,
+                            unsigned long long general_return_row_count)
 {
   size_t csize;
   char message_loc[1024];
@@ -1708,7 +1711,7 @@ do_log_query:
       break;
   }
   csize+= snprintf(message+csize, message_size - 1 - csize,
-                      "\',%d,,", error_code);
+                      "\',%d,,,%lld,%lld,%lld", error_code, general_examined_row_count, general_affected_row_count, general_return_row_count);
   message[csize]= '\n';
   result= write_log(message, csize + 1, take_lock);
   if (message == big_buffer)
@@ -1724,7 +1727,8 @@ static int log_statement(const struct connection_info *cn,
 {
   return log_statement_ex(cn, event->general_time, event->general_thread_id,
                           event->general_query.str, event->general_query.length,
-                          event->general_error_code, type, 1);
+                          event->general_error_code, type, 1, event->general_examined_row_count,
+                          event->general_affected_row_count, event->general_return_row_count);
 }
 
 
@@ -2226,7 +2230,7 @@ static void log_current_query(MYSQL_THD thd)
   {
     cn->log_always= 1;
     log_statement_ex(cn, cn->query_time, thd_get_thread_id(thd),
-		     cn->query, cn->query_length, 0, "QUERY", 0);
+		     cn->query, cn->query_length, 0, "QUERY", 0, 0, 0, 0);
     cn->log_always= 0;
   }
 }

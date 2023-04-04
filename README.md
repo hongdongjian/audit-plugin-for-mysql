@@ -1,3 +1,8 @@
+# Base
+基于开源项目 https://github.com/aws/audit-plugin-for-mysql
+
+该分支获取行数/db之类参数通过直接引入thd的头文件解决，该方式无法一个插件多版本兼容
+
 # Audit Plugin for MySQL Server
 
 The Audit Plugin for MySQL Server is used by [Amazon RDS for

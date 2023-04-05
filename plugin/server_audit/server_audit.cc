@@ -1104,7 +1104,7 @@ static void setup_connection_initdb(struct connection_info *cn,
   cn->query_length= 0;
   cn->log_always= 0;
   get_str_n(cn->db, &cn->db_length, sizeof(cn->db),
-            event->general_query.str, event->general_query.length);
+            event->general_database.str, event->general_database.length);
 
   if (get_user_host(event->general_user.str, event->general_user.length,
                     uh_buffer, sizeof(uh_buffer),
@@ -1804,7 +1804,7 @@ static void update_connection_info(struct connection_info *cn,
           {
             /* Change DB */
             get_str_n(cn->db, &cn->db_length, sizeof(cn->db),
-                event->general_query.str, event->general_query.length);
+                event->general_database.str, event->general_database.length);
           }
           cn->query_id = query_counter++;
           cn->query= event->general_query.str;

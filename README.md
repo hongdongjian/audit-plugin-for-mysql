@@ -1,3 +1,8 @@
+# Base
+基于开源项目 https://github.com/aws/audit-plugin-for-mysql
+
+该分支需要mysql将thd的一些参数通过event方式发给审计插件，代码修改参考update_mysql_audit_plugin.sh
+
 # Audit Plugin for MySQL Server
 
 The Audit Plugin for MySQL Server is used by [Amazon RDS for

@@ -1,3 +1,8 @@
+# Base
+基于开源项目 https://github.com/aws/audit-plugin-for-mysql
+
+该分支需要mysql8做些改动，需要注册几个参数方便审计主动获取，参考：https://github.com/mysql/mysql-server/pull/453/files
+
 # Audit Plugin for MySQL Server
 
 The Audit Plugin for MySQL Server is used by [Amazon RDS for
